@@ -94,6 +94,11 @@ class QuantEngine:
         for ticker in self.target_tickers:
             self.market_data[ticker] = {
                 "vol_12h": deque(maxlen=720),       # 과거 12시간 1분봉 거래대금 바구니
+                "trade_12h": deque(maxlen=720),      # 과거 12시간 1분봉 종가 바구니
+                "high_12h": deque(maxlen=720),       # 과거 12시간 1분봉 고가 바구니
+                "low_12h": deque(maxlen=720),        # 과거 12시간 1분봉 저가 바구니
+                "open_12h": deque(maxlen=720),       # 과거 12시간 1분봉 시가 바구니
+
                 "tick_price": 0.0,                  # 방금 터진 체결 가격
                 "tick_vol": 0.0,                    # 방금 터진 체결 거래대금(원화)
                 "ask_bid": "",                      # 방금 터진 체결 종류 (매수/매도)
@@ -121,9 +126,12 @@ class QuantEngine:
                 print(ticker)
                 for c in candles:
                     self.market_data[ticker]["vol_12h"].append(Decimal(c.candle_acc_trade_price))
+                    self.market_data[ticker]["trade_12h"].append(Decimal(c.trade_price))
+                    self.market_data[ticker]["high_12h"].append(Decimal(c.high_price))
+                    self.market_data[ticker]["low_12h"].append(Decimal(c.low_price))
+                    self.market_data[ticker]["open_12h"].append(Decimal(c.opening_price))
 
             except Exception as e:
-                # 에러 발생 시 조용히 넘어가지 않고 터미널에 로그를 남김
                 print(f"⚠️ {ticker} 데이터 로딩 실패: {e}")
                 sys.exit(0)
 
