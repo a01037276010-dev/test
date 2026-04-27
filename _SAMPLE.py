@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -13,6 +15,11 @@ import requests
 import websockets
 import pyupbit
 from dotenv import load_dotenv
+
+from decimal import Decimal
+
+from upbit import Upbit
+from upbit.types.connect_public_server_event import Ticker, Orderbook, WsCandleResponse
 
 # =====================================================================
 # [환경 설정] 보안 키 및 외부 연동 설정
@@ -100,27 +107,27 @@ class QuantEngine:
     # =====================================================================
     # [초기화 2] 과거 12시간 거래대금 데이터 로딩
     # =====================================================================
-    async def init_api_data(self):
+    async def init_api_data(self) -> None:
         print(f"⏳ 과거 12시간(720분) 데이터 로딩 시작...")
         
         for ticker in self.target_tickers:
             try:
                 # pyupbit를 통해 해당 코인의 12시간 치 분봉 데이터를 가져옵니다.
-                df = pyupbit.get_ohlcv(ticker, interval="minute1", count=720)
-                
-                if df is not None and len(df) == 720:
-                    # df['value']는 코인 개수가 아닌 '원화 거래대금'입니다. 이를 바구니에 채웁니다.
-                    self.market_data[ticker]["vol_12h"].extend(df['value'].tolist())
-                
-                # 업비트 API 호출 제한(초당 20회)에 걸리지 않도록 0.05초씩 쉬어줍니다.
-                await asyncio.sleep(0.05)
-                
-            except Exception:
-                pass
-                
+                candles = Upbit().candles.list_minutes(
+                    unit=1,
+                    market=ticker,
+                    count=720,
+                )
+                print(ticker)
+                for c in candles:
+                    self.market_data[ticker]["vol_12h"].append(Decimal(c.candle_acc_trade_price))
+
+            except Exception as e:
+                # 에러 발생 시 조용히 넘어가지 않고 터미널에 로그를 남김
+                print(f"⚠️ {ticker} 데이터 로딩 실패: {e}")
+                sys.exit(0)
+
         print("✅ 12시간 과거 데이터베이스 세팅 완료!\n")
-
-
     # =====================================================================
     # [행동 로직] 가상 매수 실행부
     # =====================================================================
