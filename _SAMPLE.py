@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from decimal import Decimal
 
-from upbit import Upbit
+from upbit import Upbit, DefaultAioHttpClient, AsyncUpbit
 from upbit.types.connect_public_server_event import Ticker, Orderbook, WsCandleResponse
 
 # =====================================================================
@@ -60,10 +60,6 @@ class QuantEngine:
     # [유틸리티] 디스코드 비동기 알림 시스템
     # =====================================================================
     async def send_discord(self, msg):
-        """
-        메시지 발송 때문에 봇의 0.001초 타점 계산이 멈추지 않도록, 
-        발송 작업을 메인 루프가 아닌 백그라운드 스레드로 던져버립니다.
-        """
         print(msg) 
         if DISCORD_URL:
             def post():
@@ -93,11 +89,11 @@ class QuantEngine:
         current_minute_id = int(time.time() // 60)
         for ticker in self.target_tickers:
             self.market_data[ticker] = {
-                "vol_12h": deque(maxlen=720),       # 과거 12시간 1분봉 거래대금 바구니
-                "trade_12h": deque(maxlen=720),      # 과거 12시간 1분봉 종가 바구니
-                "high_12h": deque(maxlen=720),       # 과거 12시간 1분봉 고가 바구니
-                "low_12h": deque(maxlen=720),        # 과거 12시간 1분봉 저가 바구니
-                "open_12h": deque(maxlen=720),       # 과거 12시간 1분봉 시가 바구니
+                "vol_24h": deque(maxlen=1440),      # 과거 24시간 1분봉 거래대금 바구니
+                "trade_24h": deque(maxlen=1440),     # 과거 24시간 1분봉 종가 바구니
+                "high_24h": deque(maxlen=1440),      # 과거 24시간 1분봉 고가 바구니
+                "low_24h": deque(maxlen=1440),       # 과거 24시간 1분봉 저가 바구니
+                "open_24h": deque(maxlen=1440),      # 과거 24시간 1분봉 시가 바구니
 
                 "tick_price": 0.0,                  # 방금 터진 체결 가격
                 "tick_vol": 0.0,                    # 방금 터진 체결 거래대금(원화)
@@ -110,32 +106,56 @@ class QuantEngine:
 
 
     # =====================================================================
-    # [초기화 2] 과거 12시간 거래대금 데이터 로딩
+    # [초기화 2] 과거 24시간 거래대금 데이터 로딩
     # =====================================================================
     async def init_api_data(self) -> None:
-        print(f"⏳ 과거 12시간(720분) 데이터 로딩 시작...")
+        print(f"⏳ 과거 24시간(1440분) 데이터 로딩 시작 (비동기 병렬 모드)...")
         
-        for ticker in self.target_tickers:
-            try:
-                # pyupbit를 통해 해당 코인의 12시간 치 분봉 데이터를 가져옵니다.
-                candles = Upbit().candles.list_minutes(
-                    unit=1,
-                    market=ticker,
-                    count=720,
-                )
-                print(ticker)
-                for c in candles:
-                    self.market_data[ticker]["vol_12h"].append(Decimal(c.candle_acc_trade_price))
-                    self.market_data[ticker]["trade_12h"].append(Decimal(c.trade_price))
-                    self.market_data[ticker]["high_12h"].append(Decimal(c.high_price))
-                    self.market_data[ticker]["low_12h"].append(Decimal(c.low_price))
-                    self.market_data[ticker]["open_12h"].append(Decimal(c.opening_price))
+        async with AsyncUpbit(
+            http_client=DefaultAioHttpClient()
+        ) as client:
+            semaphore = asyncio.Semaphore(3)
+            async def fetch_ticker_data(ticker):
+                async with semaphore:
+                    try:
+                        candles = await client.candles.list_minutes(
+                            unit=1,
+                            market=ticker,
+                            count=1440,
+                        )
+                        
+                        # 과거 데이터부터 채우기 위해 뒤집기
+                        for c in reversed(candles):
+                            # Decimal 변환 시 str() 사용은 정밀도를 위한 필수 습관입니다.
+                            self.market_data[ticker]["vol_24h"].append(Decimal(c.candle_acc_trade_price))
+                            self.market_data[ticker]["trade_24h"].append(Decimal(c.trade_price))
+                            self.market_data[ticker]["high_24h"].append(Decimal(c.high_price))
+                            self.market_data[ticker]["low_24h"].append(Decimal(c.low_price))
+                            self.market_data[ticker]["open_24h"].append(Decimal(c.opening_price))
+                        
+                        print(f"✅ {ticker} 로딩 완료")
+                        await asyncio.sleep(0.2)
+                        return True
+                    except Exception as e:
+                        print(f"⚠️ {ticker} 로딩 실패: {e}")
+                        if "429" in str(e) or "too many" in str(e):
+                            print(f"\n🚨 [긴급 경고]")
+                            sys.exit(1)
+                        return False
 
-            except Exception as e:
-                print(f"⚠️ {ticker} 데이터 로딩 실패: {e}")
-                sys.exit(0)
+            # 3. 모든 타겟 코인에 대해 작업 생성
+            tasks = [fetch_ticker_data(ticker) for ticker in self.target_tickers]
+            
+            # 4. 병렬 실행 및 결과 수집
+            results = await asyncio.gather(*tasks)
+            
+            # 실패한 코인 개수 확인
+            fail_count = results.count(False)
+            if fail_count >= 10:
+                print(f"❌ 실패가 너무 많습니다 ({fail_count}개). 중단 후 종료합니다.")
+                sys.exit(1)
 
-        print("✅ 12시간 과거 데이터베이스 세팅 완료!\n")
+        print(f"✅ 24시간 과거 데이터베이스 세팅 완료! (실패: {fail_count}개)\n")
     # =====================================================================
     # [행동 로직] 가상 매수 실행부
     # =====================================================================
@@ -241,7 +261,7 @@ class QuantEngine:
 
         async with websockets.connect(URI, ping_interval=None, ping_timeout=None) as ws:
             await ws.send(json.dumps(subscribe_data))
-            await self.send_discord("🚀 **[시스템] 가상 매매 엔진 V3.2 통신 개방!** 실시간 감시 시작...")
+            await self.send_discord("🚀 **[시스템] 가상 매매 엔진 통신 개방!** 실시간 감시 시작...")
 
             while True:
                 # 1. 데이터 수신 및 안전한 파싱
