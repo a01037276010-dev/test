@@ -251,35 +251,15 @@ class QuantEngine:
     # =====================================================================
     # [심장 로직] 웹소켓 실시간 데이터 수신 및 1분 롤링
     # =====================================================================
-    async def websocket_loop(self):
-        URI = "wss://api.upbit.com/websocket/v1"
-        subscribe_data = [
-            {"ticket": str(uuid.uuid4())},
-            {"type": "trade", "codes": self.target_tickers},
-            {"format": "SIMPLE"}
-        ]
-
-        async with websockets.connect(URI, ping_interval=None, ping_timeout=None) as ws:
-            await ws.send(json.dumps(subscribe_data))
+    async def async_ws_connect_public_trade(self) -> None:
+        async with AsyncUpbit() as client:
             await self.send_discord("🚀 **[시스템] 가상 매매 엔진 통신 개방!** 실시간 감시 시작...")
-
-            while True:
-                # 1. 데이터 수신 및 안전한 파싱
-                raw_data = await ws.recv()
-                if isinstance(raw_data, bytes): 
-                    raw_data = raw_data.decode("utf-8")
-                data = json.loads(raw_data)
-
-                # 2. 타겟 코인 확인
-                ticker = data.get('cd') or data.get('mk') or data.get('code')
-                if ticker not in self.market_data: 
-                    continue
-
-                # 3. 체결 가격 및 수량 확인
-                price = data.get('tp') or data.get('trade_price')
-                volume = data.get('tv') or data.get('trade_volume')
-                if price is None or volume is None: 
-                    continue
+            async with client.ws_stream.trade(self.target_tickers) as stream:
+                async for event in stream:
+                    ticker = event.code
+                    price = event.trade_price
+                    volume = event.trade_volume
+                    ask_bid = event.ask_bid  # 매수/매도 구분
 
                 # 4. 해당 코인 서랍장에 방금 터진 실시간 데이터 즉시 업데이트
                 target_data = self.market_data[ticker]
