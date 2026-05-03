@@ -73,7 +73,7 @@ class QuantEngine:
     # =====================================================================
     # [초기화 1] 타겟 코인 스캔 및 데이터 서랍장 생성
     # =====================================================================
-    def scan_target_tickers(self):
+    def init_target_tickers(self):
         print(f"🔍 [스캔 시작] 조건에 맞는 타겟 종목 검색 중...")
         
         # 업비트 원화 마켓 전 종목의 현재가를 한 번에 불러옵니다.
@@ -108,54 +108,42 @@ class QuantEngine:
     # =====================================================================
     # [초기화 2] 과거 24시간 거래대금 데이터 로딩
     # =====================================================================
-    async def init_api_data(self) -> None:
-        print(f"⏳ 과거 24시간(1440분) 데이터 로딩 시작 (비동기 병렬 모드)...")
-        
-        async with AsyncUpbit(
-            http_client=DefaultAioHttpClient()
-        ) as client:
-            semaphore = asyncio.Semaphore(3)
-            async def fetch_ticker_data(ticker):
-                async with semaphore:
-                    try:
-                        candles = await client.candles.list_minutes(
-                            unit=1,
-                            market=ticker,
-                            count=1440,
-                        )
-                        
-                        # 과거 데이터부터 채우기 위해 뒤집기
-                        for c in reversed(candles):
-                            # Decimal 변환 시 str() 사용은 정밀도를 위한 필수 습관입니다.
-                            self.market_data[ticker]["vol_24h"].append(Decimal(c.candle_acc_trade_price))
-                            self.market_data[ticker]["trade_24h"].append(Decimal(c.trade_price))
-                            self.market_data[ticker]["high_24h"].append(Decimal(c.high_price))
-                            self.market_data[ticker]["low_24h"].append(Decimal(c.low_price))
-                            self.market_data[ticker]["open_24h"].append(Decimal(c.opening_price))
-                        
-                        print(f"✅ {ticker} 로딩 완료")
-                        await asyncio.sleep(0.2)
-                        return True
-                    except Exception as e:
-                        print(f"⚠️ {ticker} 로딩 실패: {e}")
-                        if "429" in str(e) or "too many" in str(e):
-                            print(f"\n🚨 [긴급 경고]")
-                            sys.exit(1)
-                        return False
+    def road_data(self) -> None:
+        print(f"⏳ 과거 24시간(1440분) 데이터 로딩 시작")
 
-            # 3. 모든 타겟 코인에 대해 작업 생성
-            tasks = [fetch_ticker_data(ticker) for ticker in self.target_tickers]
-            
-            # 4. 병렬 실행 및 결과 수집
-            results = await asyncio.gather(*tasks)
-            
-            # 실패한 코인 개수 확인
-            fail_count = results.count(False)
-            if fail_count >= 10:
-                print(f"❌ 실패가 너무 많습니다 ({fail_count}개). 중단 후 종료합니다.")
-                sys.exit(1)
+        fail_count = 0
 
-        print(f"✅ 24시간 과거 데이터베이스 세팅 완료! (실패: {fail_count}개)\n")
+        for ticker in self.target_tickers:
+            try:
+                candles = Upbit().candles.list_minutes(
+                    unit=1,
+                    market=ticker,
+                    count=1440,
+                )
+                
+                for c in reversed(candles):
+                    self.market_data[ticker]["vol_24h"].append(Decimal(c.candle_acc_trade_price))
+                    self.market_data[ticker]["trade_24h"].append(Decimal(c.trade_price))
+                    self.market_data[ticker]["high_24h"].append(Decimal(c.high_price))
+                    self.market_data[ticker]["low_24h"].append(Decimal(c.low_price))
+                    self.market_data[ticker]["open_24h"].append(Decimal((c.opening_price)))
+                
+                print(f"✅ {ticker} 로딩 완료")
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"⚠️ {ticker} 로딩 실패: {e}")
+                if "429" in error_msg or "too many" in error_msg:
+                    print(f"\n🚨 [긴급 경고] 업비트 IP 차단 임박! (429 에러 감지). 즉시 가동을 중단합니다.")
+                    sys.exit(1)
+                
+                fail_count += 1
+                
+                if fail_count >= 10:
+                    print(f"❌ 실패 누적({fail_count}개)으로 인해 시스템을 안전 종료합니다.")
+                    sys.exit(1)
+
+        print("✅ 24시간 과거 데이터베이스 세팅 완료!\n")
     # =====================================================================
     # [행동 로직] 가상 매수 실행부
     # =====================================================================
@@ -288,14 +276,15 @@ class QuantEngine:
     # =====================================================================
     async def run(self):
         # 1. 봇 초기화 세팅
-        self.scan_target_tickers()
-        await self.init_api_data()
+        client = Upbit()
+        self.init_target_tickers()
+        self.road_data(client)
         
         # 2. 메인 무한 루프
         try:
             while True: 
                 try:
-                    await self.websocket_loop()
+                    await self.async_ws_connect_public_trade()
                     
                 # 통신이 일시적으로 끊기면 재접속
                 except websockets.ConnectionClosed:
