@@ -84,7 +84,6 @@ class QuantEngine:
             t for t, p in prices.items() 
             if p is not None and self.MIN_PRICE <= p <= self.MAX_PRICE and t not in self.NON_TARGET
         ]
-        current_timestamp_ms = int(time.time() * 1000)
         # 선정된 코인들에게 각자의 데이터를 담을 전용 서랍(Dictionary)을 만들어줍니다.
         for ticker in self.target_tickers:
             self.market_data[ticker] = {
@@ -95,7 +94,7 @@ class QuantEngine:
                 "open_24h": deque(maxlen=1440),      # 과거 24시간 1분봉 시가 바구니
 
                 # '현재 1분' 동안 실시간으로 조립 중인 캔들 데이터
-                "current_min_id": current_timestamp_ms // 60000,    # 현재 조립 중인 분(Minute)의 고유 ID
+                "current_min_id": 0,    # 현재 조립 중인 분(Minute)의 고유 ID
                 "cur_open": 0.0,        # 현재 분의 시가
                 "cur_high": 0.0,        # 현재 분의 고가 (계속 갱신됨)
                 "cur_low": 0.0,         # 현재 분의 저가 (계속 갱신됨)
@@ -109,13 +108,19 @@ class QuantEngine:
     # =====================================================================
     # [초기화 2] 과거 24시간 거래대금 데이터 로딩
     # =====================================================================
-    def road_data(self) -> None:
-        print(f"⏳ 과거 24시간(1440분) 데이터 로딩 시작")
+    def load_data(self) -> None:
+        print(f"⏳ 과거 24시간(1440분) 데이터 로딩 및 [절대 시간축 동기화] 시작...")
 
         fail_count = 0
+        
+        # 🌟 1. [절대 기준점 셋팅] 현재 분(Minute)과 정확히 24시간 전(1440분 전) 분 계산
+        current_timestamp_ms = int(time.time() * 1000)
+        current_min_id = current_timestamp_ms // 60000
+        start_min_id = current_min_id - 1440 # 우리의 출발선!
 
         for ticker in self.target_tickers:
             try:
+                # 데이터 넉넉히 가져오기
                 candles = Upbit().candles.list_minutes(
                     unit=1,
                     market=ticker,
@@ -123,27 +128,46 @@ class QuantEngine:
                 )
 
                 target_data = self.market_data[ticker]
-                for c in reversed(candles):
-                    if c.timestamp // 60000 < target_data["current_min_id"]:
-                        target_data["vol_24h"].append(Decimal(c.candle_acc_trade_price))
-                        target_data["trade_24h"].append(Decimal(c.trade_price))
-                        target_data["high_24h"].append(Decimal(c.high_price))
-                        target_data["low_24h"].append(Decimal(c.low_price))
-                        target_data["open_24h"].append(Decimal((c.opening_price)))
-                        target_data["current_min_id"] = c.timestamp // 60000
-                        if:
-                            pass
-                    #"초기"
-                    else :
-                        target_data["vol_24h"].append(Decimal(c.candle_acc_trade_price))
-                        target_data["trade_24h"].append(Decimal(c.trade_price))
-                        target_data["high_24h"].append(Decimal(c.high_price))
-                        target_data["low_24h"].append(Decimal(c.low_price))
-                        target_data["open_24h"].append(Decimal((c.opening_price)))
-                        target_data["current_min_id"] = c.timestamp // 60000
+                
+                # 🌟 2. 탐색 속도와 매칭을 위해 캔들 데이터를 딕셔너리로 변환 (key: 분 ID)
+                candle_dict = { (c.timestamp // 60000): c for c in candles }
 
+                # 🌟 3. 초기 기준가(last_close) 찾기
+                # 만약 24시간 이전의 캔들이 있다면 그 종가를 기준가로 사용
+                last_close = Decimal('0')
+                for c in candles:
+                    if (c.timestamp // 60000) <= start_min_id:
+                        last_close = Decimal(str(c.trade_price))
+                        break # 제일 최근 과거 하나만 찾으면 됨
+                
+                for m_id in range(start_min_id, current_min_id):
+                    # 만약 이번 '분'에 해당하는 캔들이 업비트에서 받아온 데이터에 있다면? (데이터 삽입)
+                    if m_id in candle_dict:
+                        c = candle_dict[m_id]
+                        target_data["open_24h"].append(Decimal(str(c.opening_price)))
+                        target_data["high_24h"].append(Decimal(str(c.high_price)))
+                        target_data["low_24h"].append(Decimal(str(c.low_price)))
+                        target_data["trade_24h"].append(Decimal(str(c.trade_price)))
+                        target_data["vol_24h"].append(Decimal(str(c.candle_acc_trade_price)))
+                        
+                        last_close = Decimal(str(c.trade_price)) # 다음 빈칸을 위해 종가 기억
+                        
+                    # 만약 이번 '분'에 거래가 단 1건도 없었다면? (회원님의 도지 캔들 보정 로직!)
+                    else:
+                        target_data["open_24h"].append(last_close)
+                        target_data["high_24h"].append(last_close)
+                        target_data["low_24h"].append(last_close)
+                        target_data["trade_24h"].append(last_close)
+                        target_data["vol_24h"].append(Decimal('0'))
 
-                print(f"✅ {ticker} 로딩 완료")
+                    # 현재 진행 중인 ID 최신화
+                    target_data["current_min_id"] = m_id
+
+                print(f"✅ {ticker} 로딩 및 절대시간 동기화 완료")
+
+            except Exception as e:
+                # (에러 처리 생략: 기존 코드와 동일)
+                pass
 
             except Exception as e:
                 error_msg = str(e)
@@ -310,7 +334,7 @@ class QuantEngine:
     async def run(self):
         # 1. 봇 초기화 세팅
         self.init_target_tickers()
-        self.road_data()
+        self.load_data()
         
         # 2. 메인 라이프사이클: 실시간 데이터 수신 및 매매 감시
         try:
